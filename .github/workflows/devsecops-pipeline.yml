@@ -1,0 +1,64 @@
+name: DevSecOps Security Pipeline
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  security-scan:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      # 1. SAST: Bandit сканирование Python кода
+      - name: Bandit Security Scan
+        run: |
+          pip install bandit
+          bandit -r . -f json -o bandit-results.json || true
+      
+      # 2. Проверка секретов в коде
+      - name: Secret Scanning with TruffleHog
+        run: |
+          docker run --rm -v "$(pwd):/src" trufflesecurity/trufflehog:latest \
+            filesystem /src --json > trufflehog-results.json || true
+      
+      # 3. Анализ зависимостей
+      - name: OWASP Dependency Check
+        uses: dependency-check/Dependency-Check_Action@main
+        with:
+          project: 'test-vulnerable-app'
+          path: '.'
+          format: 'JSON'
+          out: 'reports'
+      
+      # 4. Отправка результатов в Defect Dojo
+      - name: Upload to Defect Dojo
+        env:
+          DOJO_URL: ${{ secrets.DEFECTDOJO_URL }}
+          DOJO_API_KEY: ${{ secrets.DEFECTDOJO_API_KEY }}
+          PRODUCT_NAME: ${{ secrets.DEFECTDOJO_PRODUCT_NAME }}
+          ENGAGEMENT_ID: ${{ secrets.ENGAGEMENT_ID }}
+        run: |
+          # Загрузка Bandit результатов
+          curl -X POST "$DOJO_URL/api/v2/import-scan/" \
+            -H "Authorization: Token $DOJO_API_KEY" \
+            -F "product_name=$PRODUCT_NAME" \
+            -F "engagement=$ENGAGEMENT_ID" \
+            -F "scan_type=Bandit Scan" \
+            -F "file=@bandit-results.json"
+          
+          # Загрузка результатов Dependency Check (если файл существует)
+          if [ -f "reports/dependency-check-report.json" ]; then
+            curl -X POST "$DOJO_URL/api/v2/import-scan/" \
+              -H "Authorization: Token $DOJO_API_KEY" \
+              -F "product_name=$PRODUCT_NAME" \
+              -F "engagement=$ENGAGEMENT_ID" \
+              -F "scan_type=OWASP Dependency Check JSON" \
+              -F "file=@reports/dependency-check-report.json"
+          fi

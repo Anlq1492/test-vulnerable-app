@@ -21,12 +21,16 @@ jobs:
         run: |
           pip install bandit
           bandit -r . -f json -o bandit-results.json || true
+          echo "=== Bandit Results ==="
+          cat bandit-results.json | head -20
       
       # 2. Проверка секретов в коде
       - name: Secret Scanning with TruffleHog
         run: |
           docker run --rm -v "$(pwd):/src" trufflesecurity/trufflehog:latest \
             filesystem /src --json > trufflehog-results.json || true
+          echo "=== TruffleHog Results ==="
+          cat trufflehog-results.json | head -20
       
       # 3. Анализ зависимостей
       - name: OWASP Dependency Check
@@ -37,7 +41,17 @@ jobs:
           format: 'JSON'
           out: 'reports'
       
-      # 4. Отправка результатов в Defect Dojo
+      # 4. Проверка наличия файлов результатов
+      - name: Check results files
+        run: |
+          echo "=== Checking result files ==="
+          ls -la
+          echo "Bandit:"
+          ls -la bandit-results.json || echo "Bandit file not found"
+          echo "Dependency Check:"
+          ls -la reports/dependency-check-report.json || echo "Dependency Check file not found"
+      
+      # 5. Отправка результатов в Defect Dojo с отладкой
       - name: Upload to Defect Dojo
         env:
           DOJO_URL: ${{ secrets.DEFECTDOJO_URL }}
@@ -45,16 +59,54 @@ jobs:
           PRODUCT_NAME: ${{ secrets.DEFECTDOJO_PRODUCT_NAME }}
           ENGAGEMENT_ID: ${{ secrets.ENGAGEMENT_ID }}
         run: |
+          echo "=== Debug Info ==="
+          echo "DOJO_URL: $DOJO_URL"
+          echo "PRODUCT_NAME: $PRODUCT_NAME"
+          echo "ENGAGEMENT_ID: $ENGAGEMENT_ID"
+          echo "API_KEY length: ${#DOJO_API_KEY}"
+          
+          # Проверка наличия файлов
+          if [ ! -f "bandit-results.json" ]; then
+            echo "ERROR: bandit-results.json not found!"
+            exit 1
+          fi
+          
+          # Тест соединения с Defect Dojo
+          echo "=== Testing connection to Defect Dojo ==="
+          curl -v -X GET "$DOJO_URL/api/v2/products/" \
+            -H "Authorization: Token $DOJO_API_KEY" \
+            -H "Accept: application/json" 2>&1 | head -30
+          
           # Загрузка Bandit результатов
-          curl -X POST "$DOJO_URL/api/v2/import-scan/" \
+          echo "=== Uploading Bandit results ==="
+          RESPONSE=$(curl -v -X POST "$DOJO_URL/api/v2/import-scan/" \
             -H "Authorization: Token $DOJO_API_KEY" \
             -F "product_name=$PRODUCT_NAME" \
             -F "engagement=$ENGAGEMENT_ID" \
             -F "scan_type=Bandit Scan" \
-            -F "file=@bandit-results.json"
+            -F "file=@bandit-results.json" 2>&1)
+          
+          echo "$RESPONSE"
+          
+          # Проверка успешности загрузки
+          if echo "$RESPONSE" | grep -q "201 Created"; then
+            echo "✅ Bandit results uploaded successfully!"
+          elif echo "$RESPONSE" | grep -q "400"; then
+            echo "❌ Upload failed with 400 error"
+            echo "Check product_name and engagement_id"
+          elif echo "$RESPONSE" | grep -q "401"; then
+            echo "❌ Upload failed with 401 error"
+            echo "Invalid API key"
+          elif echo "$RESPONSE" | grep -q "404"; then
+            echo "❌ Upload failed with 404 error"
+            echo "Product or Engagement not found"
+          else
+            echo "❌ Upload failed with unknown error"
+          fi
           
           # Загрузка результатов Dependency Check (если файл существует)
           if [ -f "reports/dependency-check-report.json" ]; then
+            echo "=== Uploading Dependency Check results ==="
             curl -X POST "$DOJO_URL/api/v2/import-scan/" \
               -H "Authorization: Token $DOJO_API_KEY" \
               -F "product_name=$PRODUCT_NAME" \

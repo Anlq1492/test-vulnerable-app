@@ -6,9 +6,24 @@ on:
   pull_request:
     branches: [ main, master ]
 
+  GNU nano 8.6              .github/workflows/devsecops-pipeline.yml *                     
+name: DevSecOps Security Pipeline
+
+name: DevSecOps Security Pipeline
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
 jobs:
-  security-scan:
+  # ============================================
+  # 1. SAST с использованием Semgrep (мультиязычный)
+  # ============================================
+  sast-scan:
     runs-on: ubuntu-latest
+    name: SAST - Semgrep Security Scan
     
     steps:
       - name: Checkout code
@@ -16,23 +31,64 @@ jobs:
         with:
           fetch-depth: 0
       
-      # 1. SAST: Bandit сканирование Python кода
-      - name: Bandit Security Scan
+      - name: Semgrep Security Scan
         run: |
-          pip install bandit
-          bandit -r . -f json -o bandit-results.json || true
-          echo "=== Bandit Results ==="
-          cat bandit-results.json | head -20
+          # Установка Semgrep
+          pip install semgrep
+          
+          # Запуск Semgrep с правилами сообщества
+          semgrep scan \
+            --config auto \
+            --config p/security-audit \
+            --json \
+            --output semgrep-results.json \
+            . || true
+          
+          # Вывод статистики
+          echo "=== Semgrep Results Summary ==="
+          if [ -f "semgrep-results.json" ]; then
+            HIGH=$(jq '.results | map(select(.extra.severity == "ERROR")) | length' semgrep-results.json 2>/dev/null || echo 0)
+            MEDIUM=$(jq '.results | map(select(.extra.severity == "WARNING")) | length' semgrep-results.json 2>/dev/null || echo 0)
+            LOW=$(jq '.results | map(select(.extra.severity == "INFO")) | length' semgrep-results.json 2>/dev/null || echo 0)
+            echo "Semgrep findings: High=$HIGH, Medium=$MEDIUM, Low=$LOW"
+          fi
       
-      # 2. Проверка секретов в коде
-      - name: Secret Scanning with TruffleHog
+      - name: Upload Semgrep results to Defect Dojo
+        env:
+          DOJO_URL: ${{ secrets.DEFECTDOJO_URL }}
+          DOJO_API_KEY: ${{ secrets.DEFECTDOJO_API_KEY }}
+          PRODUCT_NAME: ${{ secrets.DEFECTDOJO_PRODUCT_NAME }}
+          ENGAGEMENT_ID: ${{ secrets.ENGAGEMENT_ID }}
         run: |
-          docker run --rm -v "$(pwd):/src" trufflesecurity/trufflehog:latest \
-            filesystem /src --json > trufflehog-results.json || true
-          echo "=== TruffleHog Results ==="
-          cat trufflehog-results.json | head -20
+          if [ -f "semgrep-results.json" ]; then
+            curl -X POST "$DOJO_URL/api/v2/import-scan/" \
+              -H "Authorization: Token $DOJO_API_KEY" \
+              -F "product_name=$PRODUCT_NAME" \
+              -F "engagement=$ENGAGEMENT_ID" \
+              -F "scan_type=Semgrep JSON" \
+              -F "file=@semgrep-results.json"
+            echo "✅ Semgrep results uploaded to Defect Dojo"
+          else
+            echo "⚠️ No Semgrep results file found"
+          fi
       
-      # 3. Анализ зависимостей
+      - name: Save Semgrep results for gate
+        uses: actions/upload-artifact@v4
+        with:
+          name: semgrep-results
+          path: semgrep-results.json
+
+  # ============================================
+  # 2. SCA - OWASP Dependency Check
+  # ============================================
+  sca-scan:
+    runs-on: ubuntu-latest
+    name: SCA - Dependency Check
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
       - name: OWASP Dependency Check
         uses: dependency-check/Dependency-Check_Action@main
         with:
@@ -41,76 +97,249 @@ jobs:
           format: 'JSON'
           out: 'reports'
       
-      # 4. Проверка наличия файлов результатов
-      - name: Check results files
-        run: |
-          echo "=== Checking result files ==="
-          ls -la
-          echo "Bandit:"
-          ls -la bandit-results.json || echo "Bandit file not found"
-          echo "Dependency Check:"
-          ls -la reports/dependency-check-report.json || echo "Dependency Check file not found"
-      
-      # 5. Отправка результатов в Defect Dojo с отладкой
-      - name: Upload to Defect Dojo
+      - name: Upload SCA results to Defect Dojo
         env:
           DOJO_URL: ${{ secrets.DEFECTDOJO_URL }}
           DOJO_API_KEY: ${{ secrets.DEFECTDOJO_API_KEY }}
           PRODUCT_NAME: ${{ secrets.DEFECTDOJO_PRODUCT_NAME }}
           ENGAGEMENT_ID: ${{ secrets.ENGAGEMENT_ID }}
         run: |
-          echo "=== Debug Info ==="
-          echo "DOJO_URL: $DOJO_URL"
-          echo "PRODUCT_NAME: $PRODUCT_NAME"
-          echo "ENGAGEMENT_ID: $ENGAGEMENT_ID"
-          echo "API_KEY length: ${#DOJO_API_KEY}"
-          
-          # Проверка наличия файлов
-          if [ ! -f "bandit-results.json" ]; then
-            echo "ERROR: bandit-results.json not found!"
-            exit 1
-          fi
-          
-          # Тест соединения с Defect Dojo
-          echo "=== Testing connection to Defect Dojo ==="
-          curl -v -X GET "$DOJO_URL/api/v2/products/" \
-            -H "Authorization: Token $DOJO_API_KEY" \
-            -H "Accept: application/json" 2>&1 | head -30
-          
-          # Загрузка Bandit результатов
-          echo "=== Uploading Bandit results ==="
-          RESPONSE=$(curl -v -X POST "$DOJO_URL/api/v2/import-scan/" \
-            -H "Authorization: Token $DOJO_API_KEY" \
-            -F "product_name=$PRODUCT_NAME" \
-            -F "engagement=$ENGAGEMENT_ID" \
-            -F "scan_type=Bandit Scan" \
-            -F "file=@bandit-results.json" 2>&1)
-          
-          echo "$RESPONSE"
-          
-          # Проверка успешности загрузки
-          if echo "$RESPONSE" | grep -q "201 Created"; then
-            echo "✅ Bandit results uploaded successfully!"
-          elif echo "$RESPONSE" | grep -q "400"; then
-            echo "❌ Upload failed with 400 error"
-            echo "Check product_name and engagement_id"
-          elif echo "$RESPONSE" | grep -q "401"; then
-            echo "❌ Upload failed with 401 error"
-            echo "Invalid API key"
-          elif echo "$RESPONSE" | grep -q "404"; then
-            echo "❌ Upload failed with 404 error"
-            echo "Product or Engagement not found"
-          else
-            echo "❌ Upload failed with unknown error"
-          fi
-          
-          # Загрузка результатов Dependency Check (если файл существует)
           if [ -f "reports/dependency-check-report.json" ]; then
-            echo "=== Uploading Dependency Check results ==="
             curl -X POST "$DOJO_URL/api/v2/import-scan/" \
               -H "Authorization: Token $DOJO_API_KEY" \
               -F "product_name=$PRODUCT_NAME" \
               -F "engagement=$ENGAGEMENT_ID" \
               -F "scan_type=OWASP Dependency Check JSON" \
               -F "file=@reports/dependency-check-report.json"
+            echo "✅ Dependency Check results uploaded to Defect Dojo"
+          fi
+      
+      - name: Save SCA results for gate
+        uses: actions/upload-artifact@v4
+        with:
+          name: sca-results
+          path: reports/dependency-check-report.json
+
+  # ============================================
+  # 3. DAST - OWASP ZAP (требует запущенного приложения)
+  # ============================================
+  dast-scan:
+    runs-on: ubuntu-latest
+    name: DAST - OWASP ZAP Scan
+    needs: [sast-scan, sca-scan]
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Build and start vulnerable application
+        run: |
+          # Сборка Docker образа
+          docker build -t vulnerable-app .
+          
+          # Запуск контейнера
+          docker run -d \
+            --name vulnerable-app \
+            -p 5000:5000 \
+            -v /tmp:/tmp \
+            vulnerable-app
+          
+          # Ожидание запуска приложения
+          echo "Waiting for application to start..."
+          for i in {1..30}; do
+            if curl -s -f http://localhost:5000 > /dev/null 2>&1; then
+              echo "✅ Application is running"
+              break
+            fi
+            sleep 2
+          done
+          
+          # Проверка, что приложение работает
+          curl -s http://localhost:5000 || echo "⚠️ Application may not be fully ready"
+      
+      - name: OWASP ZAP Baseline Scan
+        run: |
+          # Базовое сканирование ZAP
+          docker run --rm \
+            -v $(pwd):/zap/wrk:rw \
+            -u zap \
+            ghcr.io/zaproxy/zaproxy:stable \
+            zap-baseline.py \
+            -t http://host.docker.internal:5000 \
+            -r zap_report.html \
+            -J zap_results.json \
+            -j || true
+          
+          # Проверка наличия результатов
+          if [ -f "zap_results.json" ]; then
+            echo "✅ ZAP scan completed"
+            # Вывод статистики
+            HIGH=$(jq '.site[].alerts | map(select(.riskcode == 3)) | length' zap_results.json 2>/dev/null || echo 0)
+            MEDIUM=$(jq '.site[].alerts | map(select(.riskcode == 2)) | length' zap_results.json 2>/dev/null || echo 0)
+            LOW=$(jq '.site[].alerts | map(select(.riskcode == 1)) | length' zap_results.json 2>/dev/null || echo 0)
+            echo "ZAP findings: High=$HIGH, Medium=$MEDIUM, Low=$LOW"
+          else
+            echo "⚠️ ZAP did not produce results file"
+          fi
+      
+      - name: Upload DAST results to Defect Dojo
+        env:
+          DOJO_URL: ${{ secrets.DEFECTDOJO_URL }}
+          DOJO_API_KEY: ${{ secrets.DEFECTDOJO_API_KEY }}
+          PRODUCT_NAME: ${{ secrets.DEFECTDOJO_PRODUCT_NAME }}
+          ENGAGEMENT_ID: ${{ secrets.ENGAGEMENT_ID }}
+        run: |
+          if [ -f "zap_results.json" ]; then
+            curl -X POST "$DOJO_URL/api/v2/import-scan/" \
+              -H "Authorization: Token $DOJO_API_KEY" \
+              -F "product_name=$PRODUCT_NAME" \
+              -F "engagement=$ENGAGEMENT_ID" \
+              -F "scan_type=ZAP Scan" \
+              -F "file=@zap_results.json"
+            echo "✅ ZAP results uploaded to Defect Dojo"
+          fi
+      
+      - name: Save ZAP results for gate
+        uses: actions/upload-artifact@v4
+        with:
+          name: zap-results
+          path: zap_results.json
+      
+      - name: Stop application
+        if: always()
+        run: |
+          docker stop vulnerable-app || true
+          docker rm vulnerable-app || true
+
+  # ============================================
+  # 4. Security Gateway - Блокировка при High/Critical уязвимостях
+  # ============================================
+  security-gate:
+    runs-on: ubuntu-latest
+    name: Security Gateway
+    needs: [sast-scan, sca-scan, dast-scan]
+    if: always()
+    
+    steps:
+      - name: Download SAST results
+        uses: actions/download-artifact@v4
+        with:
+          name: semgrep-results
+          path: ./sast
+        continue-on-error: true
+      
+      - name: Download SCA results
+        uses: actions/download-artifact@v4
+        with:
+          name: sca-results
+          path: ./sca
+        continue-on-error: true
+      
+      - name: Download DAST results
+        uses: actions/download-artifact@v4
+        with:
+          name: zap-results
+          path: ./dast
+        continue-on-error: true
+      
+      - name: Security Gate - Block on High/Critical vulnerabilities
+        run: |
+          echo "========================================="
+          echo "🔒 SECURITY GATE - BLOCK ON HIGH/CRITICAL"
+          echo "========================================="
+          
+          BLOCK=0
+          VULN_REPORT=""
+          
+          # ==========================================
+          # 1. Проверка SAST (Semgrep) результатов
+          # ==========================================
+          if [ -f "sast/semgrep-results.json" ]; then
+            echo ""
+            echo "📊 Checking SAST (Semgrep) results..."
+            
+            # Semgrep severity: ERROR = High, WARNING = Medium, INFO = Low
+            HIGH_SAST=$(jq '.results | map(select(.extra.severity == "ERROR")) | length' sast/semgrep-results.json 2>/dev/null || echo 0)
+            
+            echo "   SAST High severity findings: $HIGH_SAST"
+            
+            if [ "$HIGH_SAST" -gt 0 ]; then
+              BLOCK=1
+              VULN_REPORT="$VULN_REPORT\n   ❌ SAST (Semgrep): $HIGH_SAST High severity vulnerabilities"
+            else
+              VULN_REPORT="$VULN_REPORT\n   ✅ SAST (Semgrep): No High severity vulnerabilities"
+            fi
+          else
+            echo "   ⚠️ No SAST results found (skipping)"
+          fi
+          
+          # ==========================================
+          # 2. Проверка SCA (Dependency Check) результатов
+          # ==========================================
+          if [ -f "sca/dependency-check-report.json" ]; then
+            echo ""
+            echo "📊 Checking SCA (Dependency Check) results..."
+            
+            # CVSS 9.0-10.0 = Critical, 7.0-8.9 = High
+            # Dependency Check использует CVSS score
+            HIGH_SCA=$(jq '[.dependencies[]?.vulnerabilities[]? | select(.cvssv3?.baseScore >= 7.0)] | length' sca/dependency-check-report.json 2>/dev/null || echo 0)
+            CRITICAL_SCA=$(jq '[.dependencies[]?.vulnerabilities[]? | select(.cvssv3?.baseScore >= 9.0)] | length' sca/dependency-check-report.json 2>/dev/null || echo 0)
+            
+            echo "   SCA High severity findings: $HIGH_SCA"
+            echo "   SCA Critical severity findings: $CRITICAL_SCA"
+            
+            TOTAL_HIGH_SCA=$((HIGH_SCA + CRITICAL_SCA))
+            
+            if [ "$TOTAL_HIGH_SCA" -gt 0 ]; then
+              BLOCK=1
+              VULN_REPORT="$VULN_REPORT\n   ❌ SCA (Dependency Check): $TOTAL_HIGH_SCA High/Critical severity vulnerabilities"
+            else
+              VULN_REPORT="$VULN_REPORT\n   ✅ SCA (Dependency Check): No High/Critical severity vulnerabilities"
+            fi
+          else
+            echo "   ⚠️ No SCA results found (skipping)"
+          fi
+          
+          # ==========================================
+          # 3. Проверка DAST (ZAP) результатов
+          # ==========================================
+          if [ -f "dast/zap_results.json" ]; then
+            echo ""
+            echo "📊 Checking DAST (ZAP) results..."
+            
+            # ZAP riskcode: 3 = High, 2 = Medium, 1 = Low, 0 = Info
+            HIGH_DAST=$(jq '[.site[].alerts[]? | select(.riskcode == 3)] | length' dast/zap_results.json 2>/dev/null || echo 0)
+            CRITICAL_DAST=$(jq '[.site[].alerts[]? | select(.riskcode == 3 and (.name | contains("SQL") or contains("Injection") or contains("RCE")))] | length' dast/zap_results.json 2>/dev/null || echo 0)
+            
+            echo "   DAST High severity findings: $HIGH_DAST"
+            
+            if [ "$HIGH_DAST" -gt 0 ]; then
+              BLOCK=1
+              VULN_REPORT="$VULN_REPORT\n   ❌ DAST (ZAP): $HIGH_DAST High severity vulnerabilities"
+            else
+              VULN_REPORT="$VULN_REPORT\n   ✅ DAST (ZAP): No High severity vulnerabilities"
+            fi
+          else
+            echo "   ⚠️ No DAST results found (skipping)"
+          fi
+          
+          # ==========================================
+          # 4. Принятие решения
+          # ==========================================
+          echo ""
+          echo "========================================="
+          echo "SECURITY GATE DECISION"
+          echo "========================================="
+          echo -e "$VULN_REPORT"
+          echo ""
+          
+          if [ "$BLOCK" -eq 1 ]; then
+            echo "❌ SECURITY GATE FAILED: High/Critical vulnerabilities found!"
+            echo "   Pull Request will be blocked."
+            echo "   Please fix all High and Critical vulnerabilities before merging."
+            exit 1
+          else
+            echo "✅ SECURITY GATE PASSED: No High/Critical vulnerabilities found!"
+            echo "   Safe to merge."
+            exit 0
           fi

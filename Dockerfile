@@ -2,11 +2,9 @@ FROM python:3.9-slim
 
 WORKDIR /app
 
-# Установка зависимостей
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Копирование приложения
 COPY app_flask.py .
 COPY app.py .
 
@@ -15,4 +13,5 @@ RUN python -c "import sqlite3; conn = sqlite3.connect('/tmp/users.db'); conn.exe
 
 EXPOSE 5000
 
-CMD ["python", "app_flask.py"]
+# Убедитесь, что приложение запускается на 0.0.0.0
+CMD ["python", "-c", "from app_flask import app; app.run(host='0.0.0.0', port=5000, debug=True)"]

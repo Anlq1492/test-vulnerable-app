@@ -90,7 +90,7 @@ jobs:
               -H "Authorization: Token $DOJO_API_KEY" \
               -F "product_name=$PRODUCT_NAME" \
               -F "engagement=$ENGAGEMENT_ID" \
-              -F "scan_type=OWASP Dependency Check" \
+              -F "scan_type=Dependency Check Scan" \
               -F "file=@reports/dependency-check-report.json"
             echo "✅ Dependency Check results uploaded"
           fi
@@ -102,7 +102,7 @@ jobs:
           path: reports/dependency-check-report.json
 
   # ============================================
-  # 3. DAST - OWASP ZAP (ИСПРАВЛЕННЫЙ С ПОДРОБНОЙ ОТЛАДКОЙ)
+  # 3. DAST - OWASP ZAP (ИСПРАВЛЕННЫЙ)
   # ============================================
   dast-scan:
     runs-on: ubuntu-latest
@@ -124,49 +124,51 @@ jobs:
             -p 5000:5000 \
             vulnerable-app
           
-          # Ожидание запуска приложения с проверкой
+          # Ждем запуска приложения
           echo "Waiting for application to start..."
           for i in {1..30}; do
+            sleep 2
             if curl -s -f http://localhost:5000 > /dev/null 2>&1; then
               echo "✅ Application is running on http://localhost:5000"
               break
             fi
             echo "Attempt $i/30: Application not ready, waiting..."
-            sleep 2
           done
           
-          # Финальная проверка
+          # Проверка, что приложение работает
           echo ""
           echo "=== Application Health Check ==="
-          curl -v http://localhost:5000 2>&1 | head -20
+          curl -v http://localhost:5000 2>&1 | head -20 || echo "Failed to connect"
           
-          # Проверка доступности всех эндпоинтов
+          # Проверка всех эндпоинтов
           echo ""
           echo "=== Testing endpoints ==="
-          curl -s http://localhost:5000/ || echo "Root endpoint failed"
-          curl -s "http://localhost:5000/user?name=test" || echo "User endpoint failed"
-          curl -s "http://localhost:5000/welcome?name=test" || echo "Welcome endpoint failed"
-          curl -s "http://localhost:5000/ping?host=localhost" || echo "Ping endpoint failed"
+          curl -s http://localhost:5000/ && echo " - Root OK" || echo " - Root FAILED"
+          curl -s "http://localhost:5000/user?name=test" && echo " - /user OK" || echo " - /user FAILED"
+          curl -s "http://localhost:5000/welcome?name=test" && echo " - /welcome OK" || echo " - /welcome FAILED"
+          curl -s "http://localhost:5000/ping?host=localhost" && echo " - /ping OK" || echo " - /ping FAILED"
           
           echo ""
-          echo "✅ Application is ready for scanning"
+          echo "=== Container status ==="
+          docker ps
+          docker logs vulnerable-app --tail 20
       
       - name: OWASP ZAP Baseline Scan
         run: |
-          # Создаем директорию с правильными правами
+          # Создаем директорию для результатов
           mkdir -p zap_results
           chmod 777 zap_results
           
           echo "Starting ZAP scan..."
           
-          # Запускаем ZAP с правами root и сетью хоста
+          # Используем линк для доступа к контейнеру приложения
           docker run --rm \
             -v $(pwd)/zap_results:/zap/wrk:rw \
-            --network host \
+            --link vulnerable-app:vulnerable-app \
             --user root \
             ghcr.io/zaproxy/zaproxy:stable \
             zap-baseline.py \
-            -t http://localhost:5000 \
+            -t http://vulnerable-app:5000 \
             -r zap_report.html \
             -J zap_results.json \
             -g zap.yaml \
@@ -178,7 +180,7 @@ jobs:
           echo "=== ZAP Scan Results ==="
           ls -la zap_results/
           
-          # Проверяем и копируем результаты
+          # Проверяем результаты
           if [ -f "zap_results/zap_results.json" ]; then
             cp zap_results/zap_results.json .
             echo "✅ ZAP results file created!"
@@ -198,15 +200,11 @@ jobs:
             echo '{"site":[]}' > zap_results.json
           fi
       
-      - name: Debug - Show ZAP findings
+      - name: Debug - Show ZAP results
         run: |
-          echo "=== ZAP Findings Details ==="
+          echo "=== ZAP Results Content ==="
           if [ -f "zap_results.json" ]; then
-            echo "Full JSON (first 50 lines):"
-            cat zap_results.json | head -50
-            echo ""
-            echo "Alerts summary:"
-            cat zap_results.json | jq '.site[].alerts[] | {risk: .risk, name: .name, description: .description}' 2>/dev/null || echo "No alerts found"
+            cat zap_results.json | jq '.site[].alerts[] | {risk: .risk, name: .name}' 2>/dev/null || echo "No alerts found"
           else
             echo "File not found"
           fi
@@ -225,23 +223,28 @@ jobs:
           
           echo ""
           echo "=== Uploading ZAP Results ==="
-          if [ -f "zap_results.json" ]; then
-            RESPONSE=$(curl -s -w "\nHTTP Status: %{http_code}\n" -X POST "$DOJO_URL/api/v2/import-scan/" \
-              -H "Authorization: Token $DOJO_API_KEY" \
-              -F "product_name=$PRODUCT_NAME" \
-              -F "engagement=$ENGAGEMENT_ID" \
-              -F "scan_type=ZAP Scan" \
-              -F "file=@zap_results.json")
-            
-            echo "$RESPONSE"
-            
-            if echo "$RESPONSE" | grep -q "201"; then
-              echo "✅ ZAP results successfully uploaded to Defect Dojo!"
+          if [ -f "zap_results.json" ] && [ -s "zap_results.json" ]; then
+            # Проверяем, что файл не пустой и содержит данные
+            if grep -q '"alerts":' zap_results.json || grep -q '"site":' zap_results.json; then
+              RESPONSE=$(curl -s -w "\nHTTP Status: %{http_code}\n" -X POST "$DOJO_URL/api/v2/import-scan/" \
+                -H "Authorization: Token $DOJO_API_KEY" \
+                -F "product_name=$PRODUCT_NAME" \
+                -F "engagement=$ENGAGEMENT_ID" \
+                -F "scan_type=ZAP Scan" \
+                -F "file=@zap_results.json")
+              
+              echo "$RESPONSE"
+              
+              if echo "$RESPONSE" | grep -q "201"; then
+                echo "✅ ZAP results successfully uploaded to Defect Dojo!"
+              else
+                echo "❌ Upload failed with status: $(echo "$RESPONSE" | grep 'HTTP Status' | awk '{print $3}')"
+              fi
             else
-              echo "❌ Upload failed"
+              echo "⚠️ ZAP results file is empty or invalid, skipping upload"
             fi
           else
-            echo "❌ No zap_results.json to upload"
+            echo "❌ No valid zap_results.json to upload"
           fi
       
       - name: Save ZAP results

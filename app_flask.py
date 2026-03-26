@@ -16,7 +16,7 @@ def get_user():
     cursor = conn.execute(query)
     return str(cursor.fetchall())
 
-# Уязвимость: SSTI
+# Уязвимость: SSTI (Server-Side Template Injection)
 @app.route('/welcome')
 def welcome():
     name = request.args.get('name', 'Guest')
@@ -30,16 +30,24 @@ def ping():
     result = os.system(f"ping -c 1 {host}")
     return f"Ping result: {result}"
 
+# Уязвимость: Path Traversal
+@app.route('/read')
+def read_file():
+    filename = request.args.get('file', '')
+    with open(f"/tmp/{filename}", 'r') as f:
+        return f.read()
+
 @app.route('/')
 def index():
     return """
     <h1>Vulnerable Test Application</h1>
     <ul>
-        <li><a href="/user?name=admin">SQL Injection</a></li>
-        <li><a href="/welcome?name={{7*7}}">SSTI</a></li>
-        <li><a href="/ping?host=127.0.0.1">Command Injection</a></li>
+        <li><a href="/user?name=admin">SQL Injection Test</a></li>
+        <li><a href="/welcome?name={{7*7}}">SSTI Test (should show 49)</a></li>
+        <li><a href="/ping?host=127.0.0.1">Command Injection Test</a></li>
+        <li><a href="/read?file=test.txt">Path Traversal Test</a></li>
     </ul>
     """
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+    app.run(host='0.0.0.0', port=5000, debug=True)

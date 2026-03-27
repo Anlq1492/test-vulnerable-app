@@ -102,7 +102,7 @@ jobs:
           path: reports/dependency-check-report.json
 
   # ============================================
-  # 3. DAST - OWASP ZAP (С ДИАГНОСТИКОЙ)
+  # 3. DAST - OWASP ZAP (ИСПРАВЛЕННЫЙ)
   # ============================================
   dast-scan:
     runs-on: ubuntu-latest
@@ -112,13 +112,6 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-      
-      - name: Debug - Show files
-        run: |
-          echo "=== Files in repository ==="
-          ls -la
-          echo "=== app_flask.py content (first 30 lines) ==="
-          head -30 app_flask.py || echo "app_flask.py not found"
       
       - name: Build and start vulnerable application
         run: |
@@ -133,33 +126,28 @@ jobs:
             -p 5000:5000 \
             vulnerable-app
           
-          # Ждем запуска с проверкой
+          # Ожидание запуска (уменьшено до 15 попыток для ускорения)
           echo "Waiting for application to start..."
-          for i in {1..30}; do
+          for i in {1..15}; do
             sleep 2
-            echo "Attempt $i/30: Checking http://localhost:5000..."
             if curl -s -f http://localhost:5000 > /dev/null 2>&1; then
               echo "✅ Application is running on http://localhost:5000"
               break
             fi
-            # Показываем последние строки лога контейнера для диагностики
-            docker logs vulnerable-app 2>&1 | tail -5
+            echo "Attempt $i/15: Application not ready..."
+            # Показываем последние строки лога для диагностики
+            docker logs vulnerable-app 2>&1 | tail -3
           done
           
           # Проверка логов контейнера
           echo ""
-          echo "=== Container logs (full) ==="
+          echo "=== Container logs ==="
           docker logs vulnerable-app 2>&1
           
-          # Проверка статуса контейнера
+          # Проверка статуса
           echo ""
           echo "=== Container status ==="
           docker ps -a
-          
-          # Проверка, что порт слушается
-          echo ""
-          echo "=== Port check ==="
-          sudo netstat -tlnp | grep 5000 || echo "Port 5000 not listening"
       
       - name: OWASP ZAP Baseline Scan
         run: |
@@ -201,15 +189,6 @@ jobs:
           else
             echo "⚠️ ZAP did not create results file"
             echo '{"site":[]}' > zap_results.json
-          fi
-      
-      - name: Debug - Show ZAP results
-        run: |
-          echo "=== ZAP Results Content ==="
-          if [ -f "zap_results.json" ]; then
-            cat zap_results.json | head -100
-          else
-            echo "File not found"
           fi
       
       - name: Upload DAST results to Defect Dojo

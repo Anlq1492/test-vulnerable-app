@@ -102,7 +102,7 @@ jobs:
           path: reports/dependency-check-report.json
 
   # ============================================
-  # 3. DAST - OWASP ZAP (ИСПРАВЛЕННЫЙ)
+  # 3. DAST - OWASP ZAP (XML FORMAT)
   # ============================================
   dast-scan:
     runs-on: ubuntu-latest
@@ -115,18 +115,15 @@ jobs:
       
       - name: Build and start vulnerable application
         run: |
-          # Сборка образа
           echo "Building Docker image..."
           docker build -t vulnerable-app .
           
-          # Запуск контейнера
           echo "Starting container..."
           docker run -d \
             --name vulnerable-app \
             -p 5000:5000 \
             vulnerable-app
           
-          # Ожидание запуска (уменьшено до 15 попыток для ускорения)
           echo "Waiting for application to start..."
           for i in {1..15}; do
             sleep 2
@@ -135,29 +132,23 @@ jobs:
               break
             fi
             echo "Attempt $i/15: Application not ready..."
-            # Показываем последние строки лога для диагностики
-            docker logs vulnerable-app 2>&1 | tail -3
           done
           
-          # Проверка логов контейнера
           echo ""
           echo "=== Container logs ==="
-          docker logs vulnerable-app 2>&1
+          docker logs vulnerable-app 2>&1 | tail -10
           
-          # Проверка статуса
           echo ""
           echo "=== Container status ==="
           docker ps -a
       
-      - name: OWASP ZAP Baseline Scan
+      - name: OWASP ZAP Baseline Scan (XML Output)
         run: |
-          # Создаем директорию для результатов
           mkdir -p zap_results
           chmod 777 zap_results
           
           echo "Starting ZAP scan..."
           
-          # Запуск ZAP
           docker run --rm \
             -v $(pwd)/zap_results:/zap/wrk:rw \
             --network host \
@@ -166,6 +157,7 @@ jobs:
             zap-baseline.py \
             -t http://localhost:5000 \
             -r zap_report.html \
+            -x zap_results.xml \
             -J zap_results.json \
             -j || true
           
@@ -173,22 +165,24 @@ jobs:
           echo "=== ZAP Scan Results ==="
           ls -la zap_results/
           
-          if [ -f "zap_results/zap_results.json" ]; then
-            cp zap_results/zap_results.json .
-            echo "✅ ZAP results file created!"
-            echo "File size: $(wc -c < zap_results.json) bytes"
+          if [ -f "zap_results/zap_results.xml" ]; then
+            cp zap_results/zap_results.xml .
+            echo "✅ ZAP XML results file created!"
+            echo "File size: $(wc -c < zap_results.xml) bytes"
             
-            HIGH=$(jq '[.site[].alerts[]? | select(.riskcode == 3)] | length' zap_results.json 2>/dev/null || echo 0)
-            MEDIUM=$(jq '[.site[].alerts[]? | select(.riskcode == 2)] | length' zap_results.json 2>/dev/null || echo 0)
-            LOW=$(jq '[.site[].alerts[]? | select(.riskcode == 1)] | length' zap_results.json 2>/dev/null || echo 0)
-            echo ""
-            echo "=== ZAP Findings Summary ==="
-            echo "High severity: $HIGH"
-            echo "Medium severity: $MEDIUM"
-            echo "Low severity: $LOW"
+            if [ -f "zap_results/zap_results.json" ]; then
+              HIGH=$(jq '[.site[].alerts[]? | select(.riskcode == 3)] | length' zap_results/zap_results.json 2>/dev/null || echo 0)
+              MEDIUM=$(jq '[.site[].alerts[]? | select(.riskcode == 2)] | length' zap_results/zap_results.json 2>/dev/null || echo 0)
+              LOW=$(jq '[.site[].alerts[]? | select(.riskcode == 1)] | length' zap_results/zap_results.json 2>/dev/null || echo 0)
+              echo ""
+              echo "=== ZAP Findings Summary ==="
+              echo "High severity: $HIGH"
+              echo "Medium severity: $MEDIUM"
+              echo "Low severity: $LOW"
+            fi
           else
-            echo "⚠️ ZAP did not create results file"
-            echo '{"site":[]}' > zap_results.json
+            echo "⚠️ ZAP did not create XML results file"
+            echo '<?xml version="1.0" encoding="UTF-8"?><OWASPZAPReport version="2" generated=""></OWASPZAPReport>' > zap_results.xml
           fi
       
       - name: Upload DAST results to Defect Dojo
@@ -205,13 +199,13 @@ jobs:
           
           echo ""
           echo "=== Uploading ZAP Results ==="
-          if [ -f "zap_results.json" ] && [ -s "zap_results.json" ]; then
+          if [ -f "zap_results.xml" ] && [ -s "zap_results.xml" ]; then
             RESPONSE=$(curl -s -w "\nHTTP Status: %{http_code}\n" -X POST "$DOJO_URL/api/v2/import-scan/" \
               -H "Authorization: Token $DOJO_API_KEY" \
               -F "product_name=$PRODUCT_NAME" \
               -F "engagement=$ENGAGEMENT_ID" \
               -F "scan_type=ZAP Scan" \
-              -F "file=@zap_results.json")
+              -F "file=@zap_results.xml")
             
             echo "$RESPONSE"
             
@@ -221,7 +215,7 @@ jobs:
               echo "❌ Upload failed"
             fi
           else
-            echo "❌ No valid zap_results.json to upload"
+            echo "❌ No valid zap_results.xml to upload"
           fi
       
       - name: Save ZAP results
@@ -229,7 +223,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: zap-results
-          path: zap_results.json
+          path: |
+            zap_results.xml
+            zap_results.json
           if-no-files-found: ignore
       
       - name: Stop application
@@ -239,7 +235,7 @@ jobs:
           docker rm vulnerable-app || true
 
   # ============================================
-  # 4. Security Gateway - Блокировка High/Critical
+  # 4. Security Gateway
   # ============================================
   security-gate:
     runs-on: ubuntu-latest
@@ -269,7 +265,7 @@ jobs:
           path: ./dast
         continue-on-error: true
       
-      - name: Security Gate - Block on High/Critical vulnerabilities
+      - name: Security Gate - Block on High/Critical
         run: |
           echo "========================================="
           echo "🔒 SECURITY GATE - BLOCK ON HIGH/CRITICAL"
@@ -278,55 +274,51 @@ jobs:
           BLOCK=0
           VULN_REPORT=""
           
-          # Проверка SAST (Semgrep)
+          # SAST
           if [ -f "sast/semgrep-results.json" ]; then
             echo ""
-            echo "📊 Checking SAST (Semgrep) results..."
+            echo "📊 Checking SAST results..."
             HIGH_SAST=$(jq '.results | map(select(.extra.severity == "ERROR")) | length' sast/semgrep-results.json 2>/dev/null || echo 0)
-            echo "   SAST High severity findings: $HIGH_SAST"
+            echo "   SAST High severity: $HIGH_SAST"
             
             if [ "$HIGH_SAST" -gt 0 ]; then
               BLOCK=1
-              VULN_REPORT="$VULN_REPORT\n   ❌ SAST (Semgrep): $HIGH_SAST High severity vulnerabilities"
+              VULN_REPORT="$VULN_REPORT\n   ❌ SAST: $HIGH_SAST High severity vulnerabilities"
             else
-              VULN_REPORT="$VULN_REPORT\n   ✅ SAST (Semgrep): No High severity vulnerabilities"
+              VULN_REPORT="$VULN_REPORT\n   ✅ SAST: No High severity vulnerabilities"
             fi
-          else
-            echo "   ⚠️ No SAST results found"
           fi
           
-          # Проверка SCA (Dependency Check)
+          # SCA
           if [ -f "sca/dependency-check-report.json" ]; then
             echo ""
-            echo "📊 Checking SCA (Dependency Check) results..."
+            echo "📊 Checking SCA results..."
             HIGH_SCA=$(jq '[.dependencies[]?.vulnerabilities[]? | select(.cvssv3?.baseScore >= 7.0)] | length' sca/dependency-check-report.json 2>/dev/null || echo 0)
-            echo "   SCA High/Critical findings: $HIGH_SCA"
+            echo "   SCA High/Critical: $HIGH_SCA"
             
             if [ "$HIGH_SCA" -gt 0 ]; then
               BLOCK=1
-              VULN_REPORT="$VULN_REPORT\n   ❌ SCA (Dependency Check): $HIGH_SCA High/Critical vulnerabilities"
+              VULN_REPORT="$VULN_REPORT\n   ❌ SCA: $HIGH_SCA High/Critical vulnerabilities"
             else
-              VULN_REPORT="$VULN_REPORT\n   ✅ SCA (Dependency Check): No High/Critical vulnerabilities"
+              VULN_REPORT="$VULN_REPORT\n   ✅ SCA: No High/Critical vulnerabilities"
             fi
-          else
-            echo "   ⚠️ No SCA results found"
           fi
           
-          # Проверка DAST (ZAP)
-          if [ -f "dast/zap_results.json" ] && [ -s "dast/zap_results.json" ]; then
+          # DAST
+          if [ -f "dast/zap_results.xml" ] && [ -s "dast/zap_results.xml" ]; then
             echo ""
-            echo "📊 Checking DAST (ZAP) results..."
-            HIGH_DAST=$(jq '[.site[].alerts[]? | select(.riskcode == 3)] | length' dast/zap_results.json 2>/dev/null || echo 0)
-            echo "   DAST High severity findings: $HIGH_DAST"
+            echo "📊 Checking DAST results..."
+            HIGH_DAST=$(grep -c 'riskcode="3"' dast/zap_results.xml 2>/dev/null || echo 0)
+            echo "   DAST High severity: $HIGH_DAST"
             
             if [ "$HIGH_DAST" -gt 0 ]; then
               BLOCK=1
-              VULN_REPORT="$VULN_REPORT\n   ❌ DAST (ZAP): $HIGH_DAST High severity vulnerabilities"
+              VULN_REPORT="$VULN_REPORT\n   ❌ DAST: $HIGH_DAST High severity vulnerabilities"
             else
-              VULN_REPORT="$VULN_REPORT\n   ✅ DAST (ZAP): No High severity vulnerabilities"
+              VULN_REPORT="$VULN_REPORT\n   ✅ DAST: No High severity vulnerabilities"
             fi
           else
-            echo "   ⚠️ No DAST results found (DAST may have failed or found no issues)"
+            echo "   ⚠️ No DAST results found"
           fi
           
           echo ""
@@ -338,11 +330,8 @@ jobs:
           
           if [ "$BLOCK" -eq 1 ]; then
             echo "❌ SECURITY GATE FAILED: High/Critical vulnerabilities found!"
-            echo "   Pull Request will be blocked."
-            echo "   Please fix all High and Critical vulnerabilities before merging."
             exit 1
           else
             echo "✅ SECURITY GATE PASSED: No High/Critical vulnerabilities found!"
-            echo "   Safe to merge."
             exit 0
           fi

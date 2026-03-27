@@ -60,7 +60,7 @@ jobs:
           path: semgrep-results.json
 
   # ============================================
-  # 2. SCA - OWASP Dependency Check
+  # 2. SCA - OWASP Dependency Check (XML формат)
   # ============================================
   sca-scan:
     runs-on: ubuntu-latest
@@ -70,12 +70,12 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
       
-      - name: OWASP Dependency Check
+      - name: OWASP Dependency Check (XML output)
         uses: dependency-check/Dependency-Check_Action@main
         with:
           project: 'test-vulnerable-app'
           path: '.'
-          format: 'JSON'
+          format: 'XML'
           out: 'reports'
       
       - name: Upload SCA results to Defect Dojo
@@ -85,13 +85,13 @@ jobs:
           PRODUCT_NAME: ${{ secrets.DEFECTDOJO_PRODUCT_NAME }}
           ENGAGEMENT_ID: ${{ secrets.ENGAGEMENT_ID }}
         run: |
-          if [ -f "reports/dependency-check-report.json" ]; then
+          if [ -f "reports/dependency-check-report.xml" ]; then
             curl -X POST "$DOJO_URL/api/v2/import-scan/" \
               -H "Authorization: Token $DOJO_API_KEY" \
               -F "product_name=$PRODUCT_NAME" \
               -F "engagement=$ENGAGEMENT_ID" \
-              -F "scan_type=Dependency Check" \
-              -F "file=@reports/dependency-check-report.json"
+              -F "scan_type=Dependency Check Scan" \
+              -F "file=@reports/dependency-check-report.xml"
             echo "✅ Dependency Check results uploaded"
           fi
       
@@ -99,10 +99,10 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: sca-results
-          path: reports/dependency-check-report.json
+          path: reports/
 
   # ============================================
-  # 3. DAST - OWASP ZAP (XML FORMAT)
+  # 3. DAST - OWASP ZAP (XML формат)
   # ============================================
   dast-scan:
     runs-on: ubuntu-latest
@@ -169,17 +169,6 @@ jobs:
             cp zap_results/zap_results.xml .
             echo "✅ ZAP XML results file created!"
             echo "File size: $(wc -c < zap_results.xml) bytes"
-            
-            if [ -f "zap_results/zap_results.json" ]; then
-              HIGH=$(jq '[.site[].alerts[]? | select(.riskcode == 3)] | length' zap_results/zap_results.json 2>/dev/null || echo 0)
-              MEDIUM=$(jq '[.site[].alerts[]? | select(.riskcode == 2)] | length' zap_results/zap_results.json 2>/dev/null || echo 0)
-              LOW=$(jq '[.site[].alerts[]? | select(.riskcode == 1)] | length' zap_results/zap_results.json 2>/dev/null || echo 0)
-              echo ""
-              echo "=== ZAP Findings Summary ==="
-              echo "High severity: $HIGH"
-              echo "Medium severity: $MEDIUM"
-              echo "Low severity: $LOW"
-            fi
           else
             echo "⚠️ ZAP did not create XML results file"
             echo '<?xml version="1.0" encoding="UTF-8"?><OWASPZAPReport version="2" generated=""></OWASPZAPReport>' > zap_results.xml
@@ -192,13 +181,6 @@ jobs:
           PRODUCT_NAME: ${{ secrets.DEFECTDOJO_PRODUCT_NAME }}
           ENGAGEMENT_ID: ${{ secrets.ENGAGEMENT_ID }}
         run: |
-          echo "=== Testing Defect Dojo Connection ==="
-          curl -s -o /dev/null -w "HTTP Status: %{http_code}\n" "$DOJO_URL/api/v2/products/" \
-            -H "Authorization: Token $DOJO_API_KEY" \
-            -H "Accept: application/json"
-          
-          echo ""
-          echo "=== Uploading ZAP Results ==="
           if [ -f "zap_results.xml" ] && [ -s "zap_results.xml" ]; then
             RESPONSE=$(curl -s -w "\nHTTP Status: %{http_code}\n" -X POST "$DOJO_URL/api/v2/import-scan/" \
               -H "Authorization: Token $DOJO_API_KEY" \
@@ -290,17 +272,17 @@ jobs:
           fi
           
           # SCA
-          if [ -f "sca/dependency-check-report.json" ]; then
+          if [ -f "sca/dependency-check-report.xml" ]; then
             echo ""
             echo "📊 Checking SCA results..."
-            HIGH_SCA=$(jq '[.dependencies[]?.vulnerabilities[]? | select(.cvssv3?.baseScore >= 7.0)] | length' sca/dependency-check-report.json 2>/dev/null || echo 0)
-            echo "   SCA High/Critical: $HIGH_SCA"
+            HIGH_SCA=$(grep -c 'severity="HIGH"' sca/dependency-check-report.xml 2>/dev/null || echo 0)
+            echo "   SCA High severity: $HIGH_SCA"
             
             if [ "$HIGH_SCA" -gt 0 ]; then
               BLOCK=1
-              VULN_REPORT="$VULN_REPORT\n   ❌ SCA: $HIGH_SCA High/Critical vulnerabilities"
+              VULN_REPORT="$VULN_REPORT\n   ❌ SCA: $HIGH_SCA High severity vulnerabilities"
             else
-              VULN_REPORT="$VULN_REPORT\n   ✅ SCA: No High/Critical vulnerabilities"
+              VULN_REPORT="$VULN_REPORT\n   ✅ SCA: No High severity vulnerabilities"
             fi
           fi
           
